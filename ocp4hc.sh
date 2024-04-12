@@ -109,3 +109,46 @@ else
   printf "Verify all operators states -- $CLRGRN PASSED $CLRRESET\n"
 fi
 
+# Pod state
+TOTALPOD=$(oc get pods -A | grep -v NAMESPACE | grep Running | wc -l)
+TOTALPODNOTREADY=$(oc get pods -A | grep -v NAMESPACE | grep -v Running | grep -v Completed | wc -l)
+printf "\nPod state:\n"
+printf "Total Running Pods: %5d\n" $TOTALPOD
+printf "Non-Running Pods:   %5d\n" $TOTALPODNOTREADY
+if [ $(($TOTALPODNOTREADY)) -gt 0 ]
+then
+  printf "\nResource to investigate:\n"
+  oc get pods -A | grep -v NAMESPACE | grep -v Running | grep -v Completed
+  printf "Verify pod states -- $CLRRED FAILED $CLRRESET\n"
+else
+  printf "Verify pod states -- $CLRGRN PASSED $CLRRESET\n"
+fi
+
+# Pending CSR
+TOTALPENDINGCSR=$(oc get csr | grep -i Pending | wc -l)
+printf "\nPending CSR(s):\n"
+printf "Total pending CSR(s): %5d\n" $TOTALPENDINGCSR
+if [ $(($TOTALPENDINGCSR)) -gt 0 ]
+then
+  printf "\nResource to investigate:\n"
+  oc get csr | grep -i Pending
+  printf "Verify pending CSR(s) -- $CLRRED FAILED $CLRRESET\n"
+else
+  printf "Verify pending CSR(s) -- $CLRGRN PASSED $CLRRESET\n"
+fi
+
+# Report deprecated API Usage
+printf "\nReport Deprecated API Usage:\n"
+oc get apirequestcounts -o json | jq -r '[
+  .items[]
+  | select(.status.removedInRelease)
+  | .metadata.name as $api 
+  | {name: .metadata.name, removedInRelease: .status.removedInRelease}
+    + (.status.last24h[] | select(has("byNode")) | .byNode[] | select(has("byUser")) | .byUser[] | {username,userAgent,"verb": .byVerb[].verb})
+    + {currHour: .status.currentHour.requestCount, last24H: .status.requestCount}
+]
+| group_by( {name, removedInRelease, username, userAgent} )
+| map(first + {verb: map(.verb) | unique})
+| .[] | [.removedInRelease, .name, .username, .userAgent, (.verb | join(",")),.currHour, .last24H]
+| join("\t")' | sort | column -N "DEPREL,NAME,USERNAME,USERAGENT,VERB,CURRHOUR,LAST24H" -t
+
