@@ -333,6 +333,145 @@ else
     printf "Verify PV state -- $CLRGRN PASSED $CLRRESET\n"
 fi
 
+# Network configuration validation (advanced - cluster, OVN, DNS, Ingress)
+# Reference: Cluster Network Operator, OVN-Kubernetes, DNS troubleshooting docs
+printf "\n-- Network configuration validation --\n"
+NETWORK_FAILED=0
+
+# 1. Cluster Network Operator status
+NET_CO_AVAIL=$(oc get clusteroperator/network -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null)
+NET_CO_DEGRADED=$(oc get clusteroperator/network -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}' 2>/dev/null)
+NET_CO_MSG=$(oc get clusteroperator/network -o jsonpath='{.status.conditions[?(@.type=="Degraded")].message}' 2>/dev/null)
+printf "Cluster Network Operator:  Available=%s  Degraded=%s\n" "${NET_CO_AVAIL:-N/A}" "${NET_CO_DEGRADED:-N/A}"
+if [ "$NET_CO_AVAIL" != "True" ] || [ "$NET_CO_DEGRADED" = "True" ]; then
+    printf "  $CLRRED FAILED $CLRRESET"
+    [ -n "$NET_CO_MSG" ] && printf " - %s" "$NET_CO_MSG"
+    printf "\n"
+    NETWORK_FAILED=1
+else
+    printf "  $CLRGRN PASSED $CLRRESET\n"
+fi
+
+# 2. Network config (clusterNetwork, serviceNetwork, networkType)
+printf "Network config (cluster):  "
+if oc get network.config/cluster &>/dev/null; then
+    NET_TYPE=$(oc get network.config/cluster -o jsonpath='{.spec.networkType}' 2>/dev/null)
+    CLUSTER_NET=$(oc get network.config/cluster -o jsonpath='{.spec.clusterNetwork[*].cidr}' 2>/dev/null)
+    SVC_NET=$(oc get network.config/cluster -o jsonpath='{.spec.serviceNetwork[*]}' 2>/dev/null)
+    printf "type=%s  clusterNetwork=%s  serviceNetwork=%s\n" "${NET_TYPE:-N/A}" "${CLUSTER_NET:-N/A}" "${SVC_NET:-N/A}"
+    if [ -z "$NET_TYPE" ] || [ -z "$CLUSTER_NET" ] || [ -z "$SVC_NET" ]; then
+        printf "  $CLRRED FAILED - missing or invalid config $CLRRESET\n"
+        NETWORK_FAILED=1
+    else
+        printf "  $CLRGRN PASSED $CLRRESET\n"
+    fi
+else
+    printf "  $CLRYLW SKIPPED (resource not found) $CLRRESET\n"
+fi
+
+# 3. Network plugin pods (OVN-Kubernetes or OpenShiftSDN)
+NET_TYPE=$(oc get network.config/cluster -o jsonpath='{.spec.networkType}' 2>/dev/null)
+if [ "$NET_TYPE" = "OVNKubernetes" ]; then
+    printf "OVN-Kubernetes pods:       "
+    OVN_TOTAL=$(oc get pods -n openshift-ovn-kubernetes --no-headers 2>/dev/null | wc -l)
+    OVN_RUNNING=$(oc get pods -n openshift-ovn-kubernetes --no-headers 2>/dev/null | grep -c Running || echo 0)
+    OVN_NOT_READY=$(oc get pods -n openshift-ovn-kubernetes --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l)
+    printf "total=%d  running=%d  not-ready=%d\n" "$OVN_TOTAL" "$OVN_RUNNING" "$OVN_NOT_READY"
+    if [ "$OVN_NOT_READY" -gt 0 ] 2>/dev/null; then
+        printf "  $CLRRED FAILED - non-running OVN pods $CLRRESET\n"
+        oc get pods -n openshift-ovn-kubernetes | grep -v Running | grep -v Completed
+        NETWORK_FAILED=1
+    else
+        printf "  $CLRGRN PASSED $CLRRESET\n"
+    fi
+elif [ "$NET_TYPE" = "OpenShiftSDN" ]; then
+    printf "OpenShiftSDN pods:        "
+    SDN_NOT_READY=$(oc get pods -n openshift-sdn --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l)
+    printf "not-ready=%d\n" "$SDN_NOT_READY"
+    [ "$SDN_NOT_READY" -gt 0 ] 2>/dev/null && { printf "  $CLRRED FAILED $CLRRESET\n"; NETWORK_FAILED=1; } || printf "  $CLRGRN PASSED $CLRRESET\n"
+fi
+
+# 4. DNS operator and CoreDNS
+printf "DNS (operator + CoreDNS):   "
+DNS_CO_AVAIL=$(oc get clusteroperator/dns -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null)
+DNS_PODS=$(oc get pods -n openshift-dns -l dns.operator.openshift.io/daemonset-dns=default --no-headers 2>/dev/null | grep -c Running || echo 0)
+printf "operator=%s  CoreDNS-pods=%d\n" "${DNS_CO_AVAIL:-N/A}" "$DNS_PODS"
+if [ "$DNS_CO_AVAIL" != "True" ] || [ "$DNS_PODS" -eq 0 ] 2>/dev/null; then
+    printf "  $CLRRED FAILED $CLRRESET\n"
+    NETWORK_FAILED=1
+else
+    printf "  $CLRGRN PASSED $CLRRESET\n"
+fi
+
+# 5. Ingress controller
+printf "Ingress controller:         "
+INGRESS_AVAIL=$(oc get ingresscontroller default -n openshift-ingress-operator -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null)
+INGRESS_DEGRADED=$(oc get ingresscontroller default -n openshift-ingress-operator -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}' 2>/dev/null)
+printf "Available=%s  Degraded=%s\n" "${INGRESS_AVAIL:-N/A}" "${INGRESS_DEGRADED:-N/A}"
+if [ "$INGRESS_AVAIL" != "True" ] || [ "$INGRESS_DEGRADED" = "True" ]; then
+    printf "  $CLRRED FAILED $CLRRESET\n"
+    NETWORK_FAILED=1
+else
+    printf "  $CLRGRN PASSED $CLRRESET\n"
+fi
+
+# 6. Network operator deployment
+printf "Network operator deploy:    "
+NET_OP_READY=$(oc get deployment network-operator -n openshift-network-operator -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+NET_OP_DESIRED=$(oc get deployment network-operator -n openshift-network-operator -o jsonpath='{.spec.replicas}' 2>/dev/null)
+printf "ready=%s/%s\n" "${NET_OP_READY:-0}" "${NET_OP_DESIRED:-1}"
+if [ "${NET_OP_READY:-0}" -lt "${NET_OP_DESIRED:-1}" ] 2>/dev/null; then
+    printf "  $CLRRED FAILED $CLRRESET\n"
+    NETWORK_FAILED=1
+else
+    printf "  $CLRGRN PASSED $CLRRESET\n"
+fi
+
+# 7. Proxy config (if cluster uses proxy)
+printf "Cluster proxy:              "
+if oc get proxy/cluster &>/dev/null; then
+    PROXY_HTTP=$(oc get proxy/cluster -o jsonpath='{.spec.httpProxy}' 2>/dev/null)
+    PROXY_HTTPS=$(oc get proxy/cluster -o jsonpath='{.spec.httpsProxy}' 2>/dev/null)
+    if [ -n "$PROXY_HTTP" ] || [ -n "$PROXY_HTTPS" ]; then
+        printf "configured\n  $CLRGRN INFO $CLRRESET\n"
+    else
+        printf "not configured\n  $CLRGRN INFO $CLRRESET\n"
+    fi
+else
+    printf "  $CLRYLW SKIPPED $CLRRESET\n"
+fi
+
+# 8. NetworkAttachmentDefinitions (Multus) - informational
+NAD_COUNT=$(oc get network-attachment-definitions -A --no-headers 2>/dev/null | wc -l)
+printf "NetworkAttachmentDefs:      %d (Multus secondary networks)\n" "$NAD_COUNT"
+
+# Summary
+if [ $NETWORK_FAILED -eq 1 ]; then
+    printf "\nNetwork validation -- $CLRRED FAILED $CLRRESET\n"
+else
+    printf "\nNetwork validation -- $CLRGRN PASSED $CLRRESET\n"
+fi
+
+if [ $NETWORK_FAILED -eq 1 ]; then
+    write_troubleshoot "Network Configuration Issues" \
+        "oc get clusteroperator/network" \
+        "oc describe clusteroperators/network" \
+        "oc get co/network -o json | jq '.status.conditions'" \
+        "oc get network.config/cluster -o yaml" \
+        "oc get network.operator cluster -o yaml" \
+        "oc get -n openshift-network-operator deployment/network-operator" \
+        "oc get pods -n openshift-ovn-kubernetes" \
+        "oc get events -n openshift-ovn-kubernetes --sort-by='.lastTimestamp'" \
+        "oc get clusteroperator/dns" \
+        "oc get pods -n openshift-dns" \
+        "oc get ingresscontroller -n openshift-ingress-operator" \
+        "oc get pods -n openshift-ingress" \
+        "oc get network-attachment-definitions -A" \
+        "oc get proxy/cluster -o yaml" \
+        "# Network must-gather: oc adm must-gather --image=quay.io/openshift/origin-must-gather:latest" \
+        "# OVN debug: oc adm must-gather --image-stream=openshift/network-tools:latest"
+fi
+
 # Image registry health (additional check)
 printf "\n-- Image Registry --\n"
 if oc get clusteroperator image-registry 2>/dev/null | grep -q "True"; then
