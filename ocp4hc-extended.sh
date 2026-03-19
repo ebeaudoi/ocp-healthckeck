@@ -352,19 +352,35 @@ else
     printf "  $CLRGRN PASSED $CLRRESET\n"
 fi
 
-# 2. Network config (clusterNetwork, serviceNetwork, networkType)
+# 2. Network config (clusterNetwork, serviceNetwork, networkType, hostPrefix)
 printf "Network config (cluster):  "
 if oc get network.config/cluster &>/dev/null; then
     NET_TYPE=$(oc get network.config/cluster -o jsonpath='{.spec.networkType}' 2>/dev/null)
     CLUSTER_NET=$(oc get network.config/cluster -o jsonpath='{.spec.clusterNetwork[*].cidr}' 2>/dev/null)
+    HOST_PREFIX=$(oc get network.config/cluster -o jsonpath='{.spec.clusterNetwork[*].hostPrefix}' 2>/dev/null)
     SVC_NET=$(oc get network.config/cluster -o jsonpath='{.spec.serviceNetwork[*]}' 2>/dev/null)
-    printf "type=%s  clusterNetwork=%s  serviceNetwork=%s\n" "${NET_TYPE:-N/A}" "${CLUSTER_NET:-N/A}" "${SVC_NET:-N/A}"
+    printf "type=%s  clusterNetwork=%s (hostPrefix=%s)  serviceNetwork=%s\n" "${NET_TYPE:-N/A}" "${CLUSTER_NET:-N/A}" "${HOST_PREFIX:-N/A}" "${SVC_NET:-N/A}"
     if [ -z "$NET_TYPE" ] || [ -z "$CLUSTER_NET" ] || [ -z "$SVC_NET" ]; then
         printf "  $CLRRED FAILED - missing or invalid config $CLRRESET\n"
         NETWORK_FAILED=1
     else
         printf "  $CLRGRN PASSED $CLRRESET\n"
     fi
+
+    # 2b. Node subnet details (node name, internal IP, pod subnet per node)
+    # OVN: k8s.ovn.org/node-subnets annotation; OpenShiftSDN: uses clusterNetwork per node
+    printf "\n  Node network details (InternalIP, Pod subnet):\n"
+    while read -r name; do
+        [ -z "$name" ] && continue
+        ip=$(oc get node "$name" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+        sub_raw=$(oc get node "$name" -o json 2>/dev/null | jq -r '.metadata.annotations["k8s.ovn.org/node-subnets"] // empty')
+        if [ -n "$sub_raw" ]; then
+            sub=$(echo "$sub_raw" | jq -r '.default[0] // . | if type == "array" then .[0] else . end' 2>/dev/null || echo "$sub_raw")
+        else
+            sub="N/A"
+        fi
+        printf "    %-45s InternalIP=%-16s PodSubnet=%s\n" "$name" "${ip:-N/A}" "${sub:-N/A}"
+    done < <(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
 else
     printf "  $CLRYLW SKIPPED (resource not found) $CLRRESET\n"
 fi
@@ -458,6 +474,7 @@ if [ $NETWORK_FAILED -eq 1 ]; then
         "oc describe clusteroperators/network" \
         "oc get co/network -o json | jq '.status.conditions'" \
         "oc get network.config/cluster -o yaml" \
+        "oc get nodes -o json | jq -r '.items[] | .metadata.name + \" \" + (.metadata.annotations[\"k8s.ovn.org/node-subnets\"] // \"N/A\")'" \
         "oc get network.operator cluster -o yaml" \
         "oc get -n openshift-network-operator deployment/network-operator" \
         "oc get pods -n openshift-ovn-kubernetes" \
