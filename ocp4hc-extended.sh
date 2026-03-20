@@ -367,20 +367,28 @@ if oc get network.config/cluster &>/dev/null; then
         printf "  $CLRGRN PASSED $CLRRESET\n"
     fi
 
-    # 2b. Node subnet details (node name, internal IP, pod subnet per node)
-    # OVN: k8s.ovn.org/node-subnets annotation; OpenShiftSDN: uses clusterNetwork per node
-    printf "\n  Node network details (InternalIP, Pod subnet):\n"
+    # 2b. Node subnet details (node name, internal IP, pod subnet, gateway per node)
+    # OVN: k8s.ovn.org/node-subnets, k8s.ovn.org/node-gateway-router-lrp-ifaddr; OpenShiftSDN: HostSubnet
+    printf "\n  Node network details (InternalIP, Pod subnet, Gateway):\n"
     while read -r name; do
         [ -z "$name" ] && continue
         ip=$(oc get node "$name" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
         sub_raw=$(oc get node "$name" -o json 2>/dev/null | jq -r '.metadata.annotations["k8s.ovn.org/node-subnets"] // empty')
+        gw=$(oc get node "$name" -o json 2>/dev/null | jq -r '.metadata.annotations["k8s.ovn.org/node-gateway-router-lrp-ifaddr"] // empty')
         if [ -n "$sub_raw" ]; then
             sub=$(echo "$sub_raw" | jq -r '.default[0] // . | if type == "array" then .[0] else . end' 2>/dev/null || echo "$sub_raw")
         else
             sub="N/A"
         fi
-        printf "    %-45s InternalIP=%-16s PodSubnet=%s\n" "$name" "${ip:-N/A}" "${sub:-N/A}"
+        printf "    %-40s InternalIP=%-16s PodSubnet=%-18s Gateway=%s\n" "$name" "${ip:-N/A}" "${sub:-N/A}" "${gw:-N/A}"
     done < <(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
+
+    # 2c. Commands to display full node network details (subnet, gateway, annotations)
+    printf "\n  Commands to display node network details:\n"
+    printf "    oc get hostsubnet                    # OpenShiftSDN: subnet, hostIP, gateway per node\n"
+    printf "    oc get nodes -o json | jq '.items[] | {name:.metadata.name, subnets:.metadata.annotations[\"k8s.ovn.org/node-subnets\"], gateway:.metadata.annotations[\"k8s.ovn.org/node-gateway-router-lrp-ifaddr\"]}'  # OVN\n"
+    printf "    oc get nns                          # Node network state (nmstate, if installed)\n"
+    printf "    oc describe node <node-name>        # Full node details including annotations\n"
 else
     printf "  $CLRYLW SKIPPED (resource not found) $CLRRESET\n"
 fi
@@ -405,6 +413,11 @@ elif [ "$NET_TYPE" = "OpenShiftSDN" ]; then
     SDN_NOT_READY=$(oc get pods -n openshift-sdn --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l)
     printf "not-ready=%d\n" "$SDN_NOT_READY"
     [ "$SDN_NOT_READY" -gt 0 ] 2>/dev/null && { printf "  $CLRRED FAILED $CLRRESET\n"; NETWORK_FAILED=1; } || printf "  $CLRGRN PASSED $CLRRESET\n"
+    # OpenShiftSDN: display HostSubnet (subnet, hostIP, gateway per node)
+    if oc get hostsubnet &>/dev/null; then
+        printf "\n  HostSubnet (node subnet, hostIP, gateway):\n"
+        oc get hostsubnet 2>/dev/null | sed 's/^/    /'
+    fi
 fi
 
 # 4. DNS operator and CoreDNS
@@ -474,7 +487,9 @@ if [ $NETWORK_FAILED -eq 1 ]; then
         "oc describe clusteroperators/network" \
         "oc get co/network -o json | jq '.status.conditions'" \
         "oc get network.config/cluster -o yaml" \
-        "oc get nodes -o json | jq -r '.items[] | .metadata.name + \" \" + (.metadata.annotations[\"k8s.ovn.org/node-subnets\"] // \"N/A\")'" \
+        "oc get hostsubnet" \
+        "oc get nodes -o json | jq '.items[] | {name:.metadata.name, subnets:.metadata.annotations[\"k8s.ovn.org/node-subnets\"], gateway:.metadata.annotations[\"k8s.ovn.org/node-gateway-router-lrp-ifaddr\"]}'" \
+        "oc get nns" \
         "oc get network.operator cluster -o yaml" \
         "oc get -n openshift-network-operator deployment/network-operator" \
         "oc get pods -n openshift-ovn-kubernetes" \
