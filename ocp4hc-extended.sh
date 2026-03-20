@@ -385,7 +385,7 @@ if oc get network.config/cluster &>/dev/null; then
 
     # 2c. Commands to display full node network details (subnet, gateway, annotations)
     printf "\n  Commands to display node network details:\n"
-    printf "    oc get hostsubnet                    # OpenShiftSDN: subnet, hostIP, gateway per node\n"
+    printf "    oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}{.status.addresses[?(@.type==\"InternalIP\")].address}{\"\\n\"}{end}'  # Machine network (node IPs)\n"
     printf "    oc get nodes -o json | jq '.items[] | {name:.metadata.name, subnets:.metadata.annotations[\"k8s.ovn.org/node-subnets\"], gateway:.metadata.annotations[\"k8s.ovn.org/node-gateway-router-lrp-ifaddr\"]}'  # OVN\n"
     printf "    oc get nns                          # Node network state (nmstate, if installed)\n"
     printf "    oc describe node <node-name>        # Full node details including annotations\n"
@@ -413,12 +413,11 @@ elif [ "$NET_TYPE" = "OpenShiftSDN" ]; then
     SDN_NOT_READY=$(oc get pods -n openshift-sdn --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l)
     printf "not-ready=%d\n" "$SDN_NOT_READY"
     [ "$SDN_NOT_READY" -gt 0 ] 2>/dev/null && { printf "  $CLRRED FAILED $CLRRESET\n"; NETWORK_FAILED=1; } || printf "  $CLRGRN PASSED $CLRRESET\n"
-    # OpenShiftSDN: display HostSubnet (subnet, hostIP, gateway per node)
-    if oc get hostsubnet &>/dev/null; then
-        printf "\n  HostSubnet (node subnet, hostIP, gateway):\n"
-        oc get hostsubnet 2>/dev/null | sed 's/^/    /'
-    fi
 fi
+
+# 3b. Machine network (node InternalIPs - nodes reside on the machine network subnet)
+printf "Machine network (node IPs):\n"
+oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null | while read -r name ip; do [ -n "$name" ] && printf "    %-40s %s\n" "$name" "$ip"; done
 
 # 4. DNS operator and CoreDNS
 printf "DNS (operator + CoreDNS):   "
@@ -487,7 +486,7 @@ if [ $NETWORK_FAILED -eq 1 ]; then
         "oc describe clusteroperators/network" \
         "oc get co/network -o json | jq '.status.conditions'" \
         "oc get network.config/cluster -o yaml" \
-        "oc get hostsubnet" \
+        "oc get nodes -o wide" \
         "oc get nodes -o json | jq '.items[] | {name:.metadata.name, subnets:.metadata.annotations[\"k8s.ovn.org/node-subnets\"], gateway:.metadata.annotations[\"k8s.ovn.org/node-gateway-router-lrp-ifaddr\"]}'" \
         "oc get nns" \
         "oc get network.operator cluster -o yaml" \
