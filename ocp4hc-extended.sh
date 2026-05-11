@@ -9,6 +9,28 @@ CLRRED=$'\033[31m'
 CLRYLW=$'\033[33m'
 CLRRESET=$'\033[0m'
 
+# Report layout (scannable sections)
+HC_LINE_WIDTH=72
+
+print_hc_category() {
+    printf '\n\n'
+    printf '%*s\n' "$HC_LINE_WIDTH" '' | tr ' ' '-'
+    printf '  %s\n' "$1"
+    printf '%*s\n' "$HC_LINE_WIDTH" '' | tr ' ' '-'
+    printf '\n'
+}
+
+print_hc_section() {
+    printf '%*s\n' "$HC_LINE_WIDTH" '' | tr ' ' '='
+    printf '  %s\n' "$1"
+    printf '%*s\n' "$HC_LINE_WIDTH" '' | tr ' ' '='
+}
+
+# Subheading inside a large section (e.g. network)
+print_hc_subsection() {
+    printf '\n  %s\n' "$1"
+}
+
 # Thresholds for CPU and memory usage (percentage)
 CPU_WARN_THRESHOLD=80
 MEM_WARN_THRESHOLD=80
@@ -91,12 +113,13 @@ fi
 # OCP cluster info
 OCPVER=$(oc get clusterversion -o=jsonpath={.items[*].status.desired.version} 2>/dev/null)
 OCPCLUSTERID=$(oc get clusterversion -o=jsonpath={.items[*].spec.clusterID} 2>/dev/null)
-printf "\n-- Cluster info --\n"
+print_hc_category "CLUSTER & NODES"
+print_hc_section "Cluster info"
 printf "OCP version   :  ${OCPVER}\n"
 printf "OCP cluster ID:  ${OCPCLUSTERID}\n"
 
 # Node information
-printf "\n-- Node details --\n"
+print_hc_section "Node details"
 printf "\nMaster nodes:\n"
 (echo "NAME|CPU|MEMORY|ROLES"; oc get nodes | grep master | awk '{print $1" "$3}' | while read node role; do echo "$(oc get node $node -o json 2>/dev/null | jq -r '(.metadata.name+"|"+.status.capacity.cpu+"|"+.status.capacity.memory)')|$role"; done) | column -s"|" -t
 oc get nodes -l node-role.kubernetes.io/master= -o json 2>/dev/null | jq -r '.items[]|(.metadata.name+","+.status.capacity.cpu+","+.status.capacity.memory)' | awk -F"," '{num=num+1;sum+=$2} END {print "Total Nodes:  "num,"      Total CPU:  "sum}'
@@ -108,7 +131,7 @@ printf "\nInfra nodes:\n"
 oc get nodes -l node-role.kubernetes.io/infra= -o json 2>/dev/null | jq -r '.items[]|(.metadata.name+","+.status.capacity.cpu+","+.status.capacity.memory)' | awk -F"," '{num=num+1;sum+=$2} END {print "Total Nodes:  "num,"      Total CPU:  "sum}'
 
 # Node CPU and Memory Usage (requires metrics-server)
-printf "\n-- Node CPU and Memory Usage --\n"
+print_hc_section "Node CPU and memory usage"
 if oc adm top nodes 2>/dev/null | head -1 | grep -q "CPU"; then
     printf "Current resource utilization:\n\n"
     oc adm top nodes
@@ -160,7 +183,7 @@ fi
 # Verify all nodes show ready to check for NotReady nodes
 TOTALNODES=$(oc get nodes | grep -v NAME | wc -l)
 TOTALNOTREADYNODE=$(oc get nodes | grep -v NAME | grep -vw Ready | wc -l)
-printf "\n-- Node state --\n"
+print_hc_section "Node readiness"
 printf "Total Nodes:        %5d\n" $TOTALNODES
 printf "Non-Ready Nodes:    %5d\n" $TOTALNOTREADYNODE
 
@@ -184,7 +207,8 @@ fi
 TOTALCOTRUE=$(oc get co | grep -v NAME | wc -l)
 TOTALCOFALSE=$(oc get co | grep -v NAME | grep -E -v "(.*)${OCPVER}(\s+)True(\s+)False(\s+)False(\s+)" | wc -l)
 
-printf "\n-- Cluster Operator state --\n"
+print_hc_category "PLATFORM & CONTROL PLANE"
+print_hc_section "Cluster operators"
 printf "Total COs:          %5d\n" $TOTALCOTRUE
 printf "Non-Ready COs:      %5d\n" $TOTALCOFALSE
 if [ $(($TOTALCOFALSE)) -gt 0 ]; then
@@ -204,7 +228,7 @@ fi
 # API Services state
 TOTALAPI=$(oc get apiservices | grep -v NAME | wc -l)
 TOTALAPINOTREADY=$(oc get apiservices | grep -v NAME | grep -E -v "(.*)True(.*)" | wc -l)
-printf "\n-- API Services state --\n"
+print_hc_section "API services"
 printf "Total API Services:          %5d\n" $TOTALAPI
 printf "Non-Ready API Services:      %5d\n" $TOTALAPINOTREADY
 if [ $(($TOTALAPINOTREADY)) -gt 0 ]; then
@@ -224,7 +248,7 @@ fi
 # Machine Config Pool state
 TOTALMCP=$(oc get mcp | grep -v NAME | wc -l)
 TOTALMCPNOTREADY=$(oc get mcp | grep -v NAME | grep -E -v "(.*)True(\s+)False(\s+)False(.*)" | wc -l)
-printf "\n-- Machine Config Pool state --\n"
+print_hc_section "Machine config pools"
 printf "Total MCPs:         %5d\n" $TOTALMCP
 printf "Non-Ready MCPs:     %5d\n" $TOTALMCPNOTREADY
 if [ $(($TOTALMCPNOTREADY)) -gt 0 ]; then
@@ -244,7 +268,8 @@ fi
 # Operator state
 TOTALCSV=$(oc get csv -A | grep -v NAMESPACE | wc -l)
 TOTALCSVFAILED=$(oc get csv -A | grep -v NAMESPACE | grep -v Succeeded | wc -l)
-printf "\n-- Operator state --\n"
+print_hc_category "OPERATORS & WORKLOADS"
+print_hc_section "Operator state (CSV)"
 printf "Total CSVs:         %5d\n" $TOTALCSV
 printf "Failed CSVs:        %5d\n" $TOTALCSVFAILED
 if [ $(($TOTALCSVFAILED)) -gt 0 ]; then
@@ -262,7 +287,7 @@ else
 fi
 
 # Installed operators (OLM ClusterServiceVersions in Succeeded phase)
-printf "\n-- Installed operators (OLM) --\n"
+print_hc_section "Installed operators (OLM)"
 CSV_JSON=$(oc get csv -A -o json 2>/dev/null)
 INSTALLED_OP_COUNT=$(echo "$CSV_JSON" | jq '[.items[] | select(.status.phase=="Succeeded")] | length' 2>/dev/null)
 if [ -z "$INSTALLED_OP_COUNT" ] || ! [[ "$INSTALLED_OP_COUNT" =~ ^[0-9]+$ ]]; then
@@ -291,7 +316,7 @@ fi
 # Pod state
 TOTALPOD=$(oc get pods -A | grep -v NAMESPACE | grep Running | wc -l)
 TOTALPODNOTREADY=$(oc get pods -A | grep -v NAMESPACE | grep -v Running | grep -v Completed | wc -l)
-printf "\n-- Pod state --\n"
+print_hc_section "Pod state"
 printf "Total Running Pods: %5d\n" $TOTALPOD
 printf "Non-Running Pods:   %5d\n" $TOTALPODNOTREADY
 if [ $(($TOTALPODNOTREADY)) -gt 0 ]; then
@@ -313,7 +338,8 @@ fi
 
 # Pending CSR
 TOTALPENDINGCSR=$(oc get csr | grep -i Pending | wc -l)
-printf "\n-- Pending CSR(s) --\n"
+print_hc_category "STORAGE & SECURITY"
+print_hc_section "Pending certificate signing requests"
 printf "Total pending CSR(s): %5d\n" $TOTALPENDINGCSR
 if [ $(($TOTALPENDINGCSR)) -gt 0 ]; then
     printf "\nResource to investigate:\n"
@@ -330,7 +356,7 @@ else
 fi
 
 # Persistent Volume status (additional check)
-printf "\n-- Persistent Volume state --\n"
+print_hc_section "Persistent volumes"
 TOTALPV=$(oc get pv | grep -v NAME | wc -l)
 PVNOTAVAILABLE=$(oc get pv | grep -v NAME | grep -v Available | grep -v Bound | wc -l)
 printf "Total PVs:          %5d\n" $TOTALPV
@@ -362,7 +388,8 @@ fi
 
 # Network configuration validation (advanced - cluster, OVN, DNS, Ingress)
 # Reference: Cluster Network Operator, OVN-Kubernetes, DNS troubleshooting docs
-printf "\n-- Network configuration validation --\n"
+print_hc_category "NETWORK"
+print_hc_section "Configuration, plugin, DNS, ingress, and machine network"
 NETWORK_FAILED=0
 
 # 1. Cluster Network Operator status
@@ -395,14 +422,14 @@ if oc get network.config/cluster &>/dev/null; then
     fi
 
     # 2b. OVN pod network per node
-    printf "\n  OVN pod network per node:\n"
+    print_hc_subsection "OVN pod network (per node)"
     oc get nodes -o json 2>/dev/null | jq -r '.items[].metadata.name' 2>/dev/null | while read -r name; do
         [ -n "$name" ] && printf "    %s\n" "$name"
     done
 
     # 2c. Node network state (nmstate operator, if installed)
     if oc get nns &>/dev/null; then
-        printf "\n  Node network state (nns):\n"
+        print_hc_subsection "Node network state (nmstate / NNS)"
         oc get nns 2>/dev/null | sed 's/^/    /'
     fi
 else
@@ -473,7 +500,7 @@ if [ -z "$MACHINE_CIDR" ] || [ "$MACHINE_CIDR" = "N/A" ]; then
 fi
 [ -z "$MACHINE_CIDR" ] && MACHINE_CIDR="N/A"
 
-printf "Machine network (node IPs, netmask):\n"
+print_hc_subsection "Machine network (node IPs and netmask)"
 if [ "$MACHINE_CIDR" != "N/A" ]; then
     printf "  CIDR/Subnet: %s\n" "$MACHINE_CIDR"
 fi
@@ -562,9 +589,9 @@ printf "NetworkAttachmentDefs:      %d (Multus secondary networks)\n" "$NAD_COUN
 
 # Summary
 if [ $NETWORK_FAILED -eq 1 ]; then
-    printf "\nNetwork validation -- $CLRRED FAILED $CLRRESET\n"
+    printf "\n  Network validation summary -- $CLRRED FAILED $CLRRESET\n"
 else
-    printf "\nNetwork validation -- $CLRGRN PASSED $CLRRESET\n"
+    printf "\n  Network validation summary -- $CLRGRN PASSED $CLRRESET\n"
 fi
 
 if [ $NETWORK_FAILED -eq 1 ]; then
@@ -595,7 +622,8 @@ if [ $NETWORK_FAILED -eq 1 ]; then
 fi
 
 # Image registry health (additional check)
-printf "\n-- Image Registry --\n"
+print_hc_category "REGISTRY & CERTIFICATES"
+print_hc_section "Image registry"
 if oc get clusteroperator image-registry 2>/dev/null | grep -q "True"; then
     printf "Image registry cluster operator -- $CLRGRN AVAILABLE $CLRRESET\n"
 else
@@ -607,7 +635,7 @@ else
 fi
 
 # Certificate expiration (additional check - next 30 days)
-printf "\n-- Certificate Expiration (next 30 days) --\n"
+print_hc_section "Certificate expiration (next 30 days)"
 CERT_EXPIRING=$(oc get secret -A -o json 2>/dev/null | jq -r '
   .items[] | select(.metadata.annotations["auth.openshift.io/certificate-not-after"] != null) |
   .metadata.annotations["auth.openshift.io/certificate-not-after"] as $exp |
@@ -638,7 +666,8 @@ fi
 # Etcd health - validated against oc get etcd cluster structure (see oc-get-etcd-cluster.yaml)
 # Key conditions: EtcdMembersAvailable=True, StaticPodsAvailable=True, EtcdMembersDegraded=False
 # Degraded-type conditions: status False = healthy, status True = degraded
-printf "\n-- Etcd status --\n"
+print_hc_category "ETCD"
+print_hc_section "Cluster status"
 ETCD_CLUSTER_JSON=$(oc get etcd cluster -o json 2>/dev/null)
 ETCD_STATUS=$(echo "$ETCD_CLUSTER_JSON" | jq -r '.status' 2>/dev/null)
 
@@ -701,7 +730,8 @@ else
 fi
 
 # Report deprecated API Usage
-printf "\n-- Deprecated API Usage --\n"
+print_hc_category "API DEPRECATIONS"
+print_hc_section "Deprecated API usage"
 oc get apirequestcounts -o json 2>/dev/null | jq -r '[
   .items[]
   | select(.status.removedInRelease)
@@ -715,7 +745,8 @@ oc get apirequestcounts -o json 2>/dev/null | jq -r '[
 | .[] | [.removedInRelease, .name, .username, .userAgent, (.verb | join(",")),.currHour, .last24H]
 | join("\t")' 2>/dev/null | sort | column -N "DEPREL,NAME,USERNAME,USERAGENT,VERB,CURRHOUR,LAST24H" -t 2>/dev/null || printf "No deprecated API usage detected or unable to query.\n"
 
-printf "\n-- End of health check report --\n\n"
+print_hc_section "End of health check report"
+printf "\n"
 
 if [ $TROUBLESHOOT_CREATED -eq 1 ]; then
     printf "${CLRYLW}Troubleshooting file created: ${TROUBLESHOOT_FILE}${CLRRESET}\n"
