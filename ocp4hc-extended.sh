@@ -261,6 +261,33 @@ else
     printf "Verify all operators states -- $CLRGRN PASSED $CLRRESET\n"
 fi
 
+# Installed operators (OLM ClusterServiceVersions in Succeeded phase)
+printf "\n-- Installed operators (OLM) --\n"
+CSV_JSON=$(oc get csv -A -o json 2>/dev/null)
+INSTALLED_OP_COUNT=$(echo "$CSV_JSON" | jq '[.items[] | select(.status.phase=="Succeeded")] | length' 2>/dev/null)
+if [ -z "$INSTALLED_OP_COUNT" ] || ! [[ "$INSTALLED_OP_COUNT" =~ ^[0-9]+$ ]]; then
+    printf "  Could not list operators (oc get csv or jq failed) -- $CLRYLW SKIPPED $CLRRESET\n"
+elif [ "$INSTALLED_OP_COUNT" -eq 0 ]; then
+    printf "  No operators in Succeeded phase.\n"
+else
+    printf "  Count: %d (ClusterServiceVersions with phase Succeeded)\n\n" "$INSTALLED_OP_COUNT"
+    printf "  %-28s %-48s %s\n" "NAMESPACE" "OPERATOR" "VERSION"
+    echo "$CSV_JSON" | jq -r '
+      [.items[] | select(.status.phase=="Succeeded")
+        | .metadata.name as $csvname
+        | [ .metadata.namespace,
+            ((.spec.displayName | if . == null or . == "" then $csvname else . end)),
+            (.spec.version // "N/A")
+          ]
+        ]
+      | sort_by(.[0], .[1])
+      | .[]
+      | @tsv
+    ' 2>/dev/null | while IFS=$'\t' read -r ns op ver; do
+        [ -n "$ns" ] && printf "  %-28s %-48s %s\n" "$ns" "$op" "${ver:-N/A}"
+    done
+fi
+
 # Pod state
 TOTALPOD=$(oc get pods -A | grep -v NAMESPACE | grep Running | wc -l)
 TOTALPODNOTREADY=$(oc get pods -A | grep -v NAMESPACE | grep -v Running | grep -v Completed | wc -l)
@@ -367,28 +394,17 @@ if oc get network.config/cluster &>/dev/null; then
         printf "  $CLRGRN PASSED $CLRRESET\n"
     fi
 
-    # 2b. Node subnet details (node name, internal IP, pod subnet, gateway per node)
-    # OVN: k8s.ovn.org/node-subnets, k8s.ovn.org/node-gateway-router-lrp-ifaddr; OpenShiftSDN: HostSubnet
-    printf "\n  Node network details (InternalIP, Pod subnet, Gateway):\n"
-    while read -r name; do
-        [ -z "$name" ] && continue
-        ip=$(oc get node "$name" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
-        sub_raw=$(oc get node "$name" -o json 2>/dev/null | jq -r '.metadata.annotations["k8s.ovn.org/node-subnets"] // empty')
-        gw=$(oc get node "$name" -o json 2>/dev/null | jq -r '.metadata.annotations["k8s.ovn.org/node-gateway-router-lrp-ifaddr"] // empty')
-        if [ -n "$sub_raw" ]; then
-            sub=$(echo "$sub_raw" | jq -r '.default[0] // . | if type == "array" then .[0] else . end' 2>/dev/null || echo "$sub_raw")
-        else
-            sub="N/A"
-        fi
-        printf "    %-40s InternalIP=%-16s PodSubnet=%-18s Gateway=%s\n" "$name" "${ip:-N/A}" "${sub:-N/A}" "${gw:-N/A}"
-    done < <(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
+    # 2b. OVN pod network per node
+    printf "\n  OVN pod network per node:\n"
+    oc get nodes -o json 2>/dev/null | jq -r '.items[].metadata.name' 2>/dev/null | while read -r name; do
+        [ -n "$name" ] && printf "    %s\n" "$name"
+    done
 
-    # 2c. Commands to display full node network details (subnet, gateway, annotations)
-    printf "\n  Commands to display node network details:\n"
-    printf "    oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}{.status.addresses[?(@.type==\"InternalIP\")].address}{\"\\n\"}{end}'  # Machine network (node IPs)\n"
-    printf "    oc get nodes -o json | jq '.items[] | {name:.metadata.name, subnets:.metadata.annotations[\"k8s.ovn.org/node-subnets\"], gateway:.metadata.annotations[\"k8s.ovn.org/node-gateway-router-lrp-ifaddr\"]}'  # OVN\n"
-    printf "    oc get nns                          # Node network state (nmstate, if installed)\n"
-    printf "    oc describe node <node-name>        # Full node details including annotations\n"
+    # 2c. Node network state (nmstate operator, if installed)
+    if oc get nns &>/dev/null; then
+        printf "\n  Node network state (nns):\n"
+        oc get nns 2>/dev/null | sed 's/^/    /'
+    fi
 else
     printf "  $CLRYLW SKIPPED (resource not found) $CLRRESET\n"
 fi
@@ -416,8 +432,79 @@ elif [ "$NET_TYPE" = "OpenShiftSDN" ]; then
 fi
 
 # 3b. Machine network (node InternalIPs - nodes reside on the machine network subnet)
-printf "Machine network (node IPs):\n"
-oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null | while read -r name ip; do [ -n "$name" ] && printf "    %-40s %s\n" "$name" "$ip"; done
+# Reference: https://access.redhat.com/solutions/7074593 - How to get Machine Network CIDR in RHOCP 4
+# Sources (in order): cluster-config-v1, AgentClusterInstall, ClusterInstall, ClusterDeployment, derive from IPs
+MACHINE_CIDR=$(oc -n kube-system get cm/cluster-config-v1 -o yaml 2>/dev/null | sed -n '/machineNetwork:/,/clusterNetwork:\|serviceNetwork:\|^[^ ]/p' | grep 'cidr:' | head -1 | awk '{print $NF}')
+if [ -z "$MACHINE_CIDR" ]; then
+    MACHINE_CIDR=$(oc get agentclusterinstall -A -o jsonpath='{.items[0].spec.networking.machineNetwork[0].cidr}' 2>/dev/null)
+fi
+if [ -z "$MACHINE_CIDR" ]; then
+    MACHINE_CIDR=$(oc get clusterinstall -A -o jsonpath='{.items[0].spec.machineNetwork[0].cidr}' 2>/dev/null)
+fi
+if [ -z "$MACHINE_CIDR" ]; then
+    # Try ClusterDeployment (ACM) - install-config may have machineNetwork
+    INSTALL_CONFIG_CM=$(oc get clusterdeployment -A -o jsonpath='{.items[0].spec.clusterMetadata.installConfig.configMapRef.name}' 2>/dev/null)
+    INSTALL_CONFIG_NS=$(oc get clusterdeployment -A -o jsonpath='{.items[0].spec.clusterMetadata.installConfig.configMapRef.namespace}' 2>/dev/null)
+    if [ -n "$INSTALL_CONFIG_CM" ] && [ -n "$INSTALL_CONFIG_NS" ]; then
+        MACHINE_CIDR=$(oc get configmap "$INSTALL_CONFIG_CM" -n "$INSTALL_CONFIG_NS" -o jsonpath='{.data.install-config}' 2>/dev/null | sed -n '/machineNetwork:/,/serviceNetwork:\|^[^ ]/p' | grep 'cidr:' | head -1 | awk '{print $NF}')
+    fi
+fi
+# Derive CIDR from node IPs when not found (per https://access.redhat.com/solutions/7074593)
+# Extract subnet from CIDR: all node IPs on same /24 -> 10.8.51.0/24; same /16 -> 10.8.0.0/16; etc.
+if [ -z "$MACHINE_CIDR" ] || [ "$MACHINE_CIDR" = "N/A" ]; then
+    NODE_IPS=$(oc get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null | tr ' ' '\n' | grep -v '^$')
+    if [ -n "$NODE_IPS" ]; then
+        for prefix in 24 16 8; do
+            octets=$((prefix / 8))
+            first_octets=$(echo "$NODE_IPS" | while read -r ip; do echo "$ip" | cut -d. -f1-$octets; done | sort -u)
+            if [ "$(echo "$first_octets" | wc -l)" -eq 1 ] && [ -n "$first_octets" ]; then
+                base=$(echo "$first_octets" | head -1)
+                # Pad to full IP: /24 needs 4 octets, use .0 for rest
+                case $prefix in
+                    24) MACHINE_CIDR="${base}.0/24" ;;
+                    16) MACHINE_CIDR="${base}.0.0/16" ;;
+                    8)  MACHINE_CIDR="${base}.0.0.0/8" ;;
+                esac
+                MACHINE_CIDR="(derived) $MACHINE_CIDR"
+                break
+            fi
+        done
+    fi
+fi
+[ -z "$MACHINE_CIDR" ] && MACHINE_CIDR="N/A"
+
+printf "Machine network (node IPs, netmask):\n"
+if [ "$MACHINE_CIDR" != "N/A" ]; then
+    printf "  CIDR/Subnet: %s\n" "$MACHINE_CIDR"
+fi
+printf "  %-45s %-16s %s\n" "NODE" "INTERNAL-IP" "NETMASK"
+
+# Get netmask per node: prefer NodeNetworkState (actual interface config), else use MACHINE_CIDR
+while read -r name; do
+    [ -z "$name" ] && continue
+    ip=$(oc get node "$name" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+    mask="N/A"
+    # 1. Try NodeNetworkState (nmstate) - get prefix from PRIMARY node interface only
+    # Exclude OVN/OVS/bridge (pod network) - only use physical NICs: eth*, ens*, eno*, enp*, em*, ib*
+    if oc get nns "$name" &>/dev/null && [ -n "$ip" ]; then
+        nns_prefix=$(oc get nns "$name" -o json 2>/dev/null | jq -r --arg ip "$ip" '
+            .status.currentState.interfaces[]? |
+            select(.ipv4 != null and (.ipv4.address[]? | .ip == $ip)) |
+            select(.name | test("^eth[0-9]+|^eno[0-9]+|^ens[0-9]+|^enp[0-9]+|^em[0-9]+|^ib[0-9]+") and
+                   (.name | test("^br-|^ovn|^ovs|^geneve|^vxlan|^veth|^lo|^ovn-k8s") | not)) |
+            .ipv4.address[]? | select(.ip == $ip) |
+            "/" + (.["prefix-length"] // .prefixLength // "N/A" | tostring) |
+            select(. != "/N/A")
+        ' 2>/dev/null | head -1)
+        [ -n "$nns_prefix" ] && mask="$nns_prefix"
+    fi
+    # 2. Fallback to cluster-wide MACHINE_CIDR (extract subnet from CIDR per solution 7074593)
+    if [ "$mask" = "N/A" ] && [ "$MACHINE_CIDR" != "N/A" ]; then
+        cidr_prefix=$(echo "$MACHINE_CIDR" | grep -oE '/[0-9]+' | tail -1 | tr -d '/')
+        [ -n "$cidr_prefix" ] && mask="/$cidr_prefix"
+    fi
+    printf "  %-45s %-16s %s\n" "$name" "${ip:-N/A}" "$mask"
+done < <(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
 
 # 4. DNS operator and CoreDNS
 printf "DNS (operator + CoreDNS):   "
@@ -498,6 +585,10 @@ if [ $NETWORK_FAILED -eq 1 ]; then
         "oc get ingresscontroller -n openshift-ingress-operator" \
         "oc get pods -n openshift-ingress" \
         "oc get network-attachment-definitions -A" \
+        "# Machine network CIDR: https://access.redhat.com/solutions/7074593" \
+        "oc -n kube-system get cm/cluster-config-v1 -o yaml" \
+        "oc get agentclusterinstall -A -o jsonpath='{.items[0].spec.networking.machineNetwork[0].cidr}'" \
+        "oc get clusterinstall -A -o jsonpath='{.items[0].spec.machineNetwork[0].cidr}'" \
         "oc get proxy/cluster -o yaml" \
         "# Network must-gather: oc adm must-gather --image=quay.io/openshift/origin-must-gather:latest" \
         "# OVN debug: oc adm must-gather --image-stream=openshift/network-tools:latest"
