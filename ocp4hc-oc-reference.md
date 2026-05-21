@@ -61,9 +61,13 @@ Commands extracted from the extended cluster health check script. Placeholders s
 | Command | Description |
 |---------|-------------|
 | `oc get csv -A` | List ClusterServiceVersions in all namespaces (OLM operator install state). |
-| `oc get csv -A -o json` | CSVs as JSON (operator install state, installed-operator listing, failure diagnosis). |
+| `oc get csv -A -o json` | CSVs as JSON; use with jq below to list installed operators and versions, or to diagnose failed installs. |
+| `oc describe csv -n <namespace> <csv-name>` | Diagnose a failed or non-Succeeded operator install. |
+| `oc get pods -A` | List pods in all namespaces (running vs non-running counts). |
+| `oc describe pod -n <namespace> <pod-name>` | Pod events, scheduling, and container state for failing pods. |
+| `oc logs -n <namespace> <pod-name> --tail=50` | Recent container logs for a non-running pod. |
 
-**Installed operators with version** (Succeeded phase; matches health check “Installed operators (OLM)”):
+**Installed operators with version** — Succeeded-phase CSVs with namespace, display name, and `spec.version` (matches health check “Installed operators (OLM)”):
 
 ```bash
 oc get csv -A -o json | jq -r '
@@ -77,11 +81,6 @@ oc get csv -A -o json | jq -r '
   | .[]
   | @tsv' | column -t
 ```
-
-| `oc describe csv -n <namespace> <csv-name>` | Diagnose a failed or non-Succeeded operator install. |
-| `oc get pods -A` | List pods in all namespaces (running vs non-running counts). |
-| `oc describe pod -n <namespace> <pod-name>` | Pod events, scheduling, and container state for failing pods. |
-| `oc logs -n <namespace> <pod-name> --tail=50` | Recent container logs for a non-running pod. |
 
 ---
 
