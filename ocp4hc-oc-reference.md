@@ -60,14 +60,17 @@ Commands extracted from the extended cluster health check script. Placeholders s
 
 | Command | Description |
 |---------|-------------|
-| `oc get csv -A` | List ClusterServiceVersions in all namespaces (OLM operator install state). |
-| `oc get csv -A -o json` | CSVs as JSON; use with jq below to list installed operators and versions, or to diagnose failed installs. |
+| `oc get csv -A` | List CSVs cluster-wide (install state); default output includes VERSION — filter with `awk` below for a quick view. |
+| `oc get csv -A -o json` | CSVs as JSON for operator listing or failure diagnosis (optional jq filter below). |
+| `oc get csv -A -o go-template=...` | List installed operators with version without jq (see go-template example below). |
 | `oc describe csv -n <namespace> <csv-name>` | Diagnose a failed or non-Succeeded operator install. |
 | `oc get pods -A` | List pods in all namespaces (running vs non-running counts). |
 | `oc describe pod -n <namespace> <pod-name>` | Pod events, scheduling, and container state for failing pods. |
 | `oc logs -n <namespace> <pod-name> --tail=50` | Recent container logs for a non-running pod. |
 
-**Installed operators with version** — Succeeded-phase CSVs with namespace, display name, and `spec.version` (matches health check “Installed operators (OLM)”):
+**Installed operators with version** — Succeeded-phase CSVs with namespace, display name, and `spec.version` (matches health check “Installed operators (OLM)”).
+
+*With jq:*
 
 ```bash
 oc get csv -A -o json | jq -r '
@@ -80,6 +83,21 @@ oc get csv -A -o json | jq -r '
   | sort_by(.[0], .[1])
   | .[]
   | @tsv' | column -t
+```
+
+*Without jq* — uses `oc` go-template, `awk`, and `sort` (POSIX-friendly; no `jq` or `column` required):
+
+```bash
+printf "%-28s %-48s %s\n" NAMESPACE OPERATOR VERSION
+oc get csv -A -o go-template='{{range .items}}{{if eq .status.phase "Succeeded"}}{{.metadata.namespace}}{{"	"}}{{if .spec.displayName}}{{.spec.displayName}}{{else}}{{.metadata.name}}{{end}}{{"	"}}{{if .spec.version}}{{.spec.version}}{{else}}N/A{{end}}{{"\n"}}{{end}}{{end}}' \
+  | LC_ALL=C sort \
+  | awk -F'	' '{printf "%-28s %-48s %s\n", $1, $2, ($3 != "" ? $3 : "N/A")}'
+```
+
+*Quick view* — default `oc` columns (includes VERSION); keep rows where phase is Succeeded:
+
+```bash
+oc get csv -A | awk 'NR==1 || $NF=="Succeeded"'
 ```
 
 ---
