@@ -231,8 +231,8 @@ Compare **Machine age/IP** with **Node age/IP**. A large age gap plus different 
 *Single Machine — age, phase, linked node, IP from Machine status:*
 
 ```bash
-oc get machine <machine-name> -n openshift-machine-api -o wide
-oc get machine <machine-name> -n openshift-machine-api -o jsonpath='
+oc get machines.machine.openshift.io <machine-name> -n openshift-machine-api -o wide
+oc get machines.machine.openshift.io <machine-name> -n openshift-machine-api -o jsonpath='
   Machine:     {.metadata.name}
   Created:     {.metadata.creationTimestamp}
   Generation:  {.metadata.generation}
@@ -263,7 +263,7 @@ oc get node <node-name> -o jsonpath='
 
 ```bash
 printf "%-32s %-20s %-16s %-32s %-20s %-16s\n" MACHINE M_CREATED MACHINE_IP NODE N_CREATED NODE_IP
-oc get machine -n openshift-machine-api \
+oc get machines.machine.openshift.io -n openshift-machine-api \
   -l machine.openshift.io/cluster-api-machine-role=master \
   -o go-template='{{range .items}}{{.metadata.name}}{{"	"}}{{.metadata.creationTimestamp}}{{"	"}}{{range .status.addresses}}{{if eq .type "InternalIP"}}{{.address}}{{end}}{{end}}{{"	"}}{{if .status.nodeRef}}{{.status.nodeRef.name}}{{end}}{{"\n"}}{{end}}' \
 | while IFS="$(printf '\t')" read -r m mc mip n; do
@@ -282,7 +282,7 @@ done
 *Alternative (two wide listings, no loop — compare MACHINE vs NODE columns manually):*
 
 ```bash
-oc get machine -n openshift-machine-api \
+oc get machines.machine.openshift.io -n openshift-machine-api \
   -l machine.openshift.io/cluster-api-machine-role=master -o wide
 oc get nodes -l node-role.kubernetes.io/master= -o wide
 ```
@@ -308,12 +308,12 @@ oc get etcd cluster -o jsonpath='{range .status.nodeStatuses[*]}{.nodeName}{"\t"
 | `oc describe node <node-name>` | Conditions, taints, events (NotReady, Unknown, unreachable). |
 | `oc adm node-logs <node-name> kubelet` | Kubelet logs on the failing master (requires node access). |
 | `oc debug node/<node-name> -- chroot /host journalctl -u kubelet -n 200` | Kubelet journal on the node (interactive debug). |
-| `oc get machine <machine-name> -n openshift-machine-api -o jsonpath='{.metadata.creationTimestamp}{"\n"}{.status.addresses}'` | Machine object age and status addresses (operator-facing IP). |
+| `oc get machines.machine.openshift.io <machine-name> -n openshift-machine-api -o jsonpath='{.metadata.creationTimestamp}{"\n"}{.status.addresses}'` | Machine object age and status addresses (operator-facing IP). |
 | `oc get node <node-name> -o jsonpath='{.metadata.creationTimestamp}{"\n"}{.status.addresses}'` | Node object age and status addresses (kubelet-reported IP). |
-| `oc get machine -n openshift-machine-api -l machine.openshift.io/cluster-api-machine-role=master -o custom-columns=NAME:.metadata.name,AGE:.metadata.creationTimestamp,IP:.status.addresses[?(@.type=="InternalIP")].address,NODE:.status.nodeRef.name` | All master Machines with creation time and IP. |
+| `oc get machines.machine.openshift.io -n openshift-machine-api -l machine.openshift.io/cluster-api-machine-role=master -o custom-columns=NAME:.metadata.name,AGE:.metadata.creationTimestamp,IP:.status.addresses[?(@.type=="InternalIP")].address,NODE:.status.nodeRef.name` | All master Machines with creation time and IP. |
 | `oc get nodes -l node-role.kubernetes.io/master= -o custom-columns=NAME:.metadata.name,AGE:.metadata.creationTimestamp,IP:.status.addresses[?(@.type=="InternalIP")].address,MACHINE:.metadata.annotations.machine\.openshift\.io/machine` | All master Nodes with creation time, IP, and Machine annotation. |
-| `oc get machine -n openshift-machine-api -l machine.openshift.io/cluster-api-machine-role=master` | Master Machine objects and phase. |
-| `oc describe machine <machine-name> -n openshift-machine-api` | Drainable/Terminable conditions, `EtcdQuorumOperator` hook, nodeRef. |
+| `oc get machines.machine.openshift.io -n openshift-machine-api -l machine.openshift.io/cluster-api-machine-role=master` | Master Machine objects and phase. |
+| `oc describe machines.machine.openshift.io <machine-name> -n openshift-machine-api` | Drainable/Terminable conditions, `EtcdQuorumOperator` hook, nodeRef. |
 | `oc get machineset -n openshift-machine-api` | MachineSets for control-plane (scale/replace context). |
 | `oc get baremetalhost -n openshift-machine-api` | Bare-metal host provisioning state (IPI bare metal). |
 | `oc describe baremetalhost <host-name> -n openshift-machine-api` | BMH errors, `operationalStatus`, consumerRef to Machine. |
