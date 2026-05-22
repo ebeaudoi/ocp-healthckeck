@@ -209,20 +209,80 @@ oc get csv -A -o go-template='{{range .items}}{{if eq .status.phase "Succeeded"}
 
 ## Master node replacement troubleshooting
 
-Analysis from `must-gather-siriusxm.tar.gz` (cluster **sv7-cl1-r2dt7**, bare-metal masters **cl1-con01/02/03**).
+Typical failure pattern from must-gather analysis (bare-metal or IPI control plane). Replace placeholders with your cluster’s names and IPs.
 
 ### Root cause (summary)
 
-Master replacement for **cl1-con01.sv7.ocp.broadcast.siriusxm.com** (`sv7-cl1-r2dt7-master-0`) failed and left the control plane degraded:
+A failed master replacement often leaves the control plane degraded:
 
-1. **Replacement node never stabilized** — Node registered `2026-05-21T18:08:57Z`, first reported `KubeletNotReady` / **NetworkPluginNotReady** (no CNI in `/etc/kubernetes/cni/net.d/`), then **NodeStatusUnknown** from `2026-05-21T20:49:13Z` (kubelet stopped posting status).
-2. **Stale / pending etcd member** — `clusteroperator/etcd` reports `NAME-PENDING-10.103.50.13 has not started` (only 2 of 3 members healthy). API server etcd URLs were updated to `https://10.103.50.13:2379` while the member never joined.
-3. **IP inconsistency on the failing master** — Node `status.addresses` shows **10.103.50.13**, but the Machine and OVN annotations still reference **10.103.50.91**, blocking correct etcd endpoint and network alignment.
-4. **Static pod rollout stuck** — `etcd` operator: `cl1-con01` at revision **39**, target **51**; `0 nodes have achieved new revision 51`. Missing static pods on cl1-con01 for kube-controller-manager and kube-scheduler.
-5. **Machine drain blocked** — All master Machines show `Drainable=False` with `EtcdQuorumOperator` preDrain hook (expected until etcd approves removal).
-6. **Downstream impact** — `machine-config` master pool: **2/3 ready**, **1 unavailable**; network operator rollouts stalled on the failed node.
+1. **Replacement node never stabilized** — New Node object reports `KubeletNotReady` / **NetworkPluginNotReady** (CNI not ready), then **NodeStatusUnknown** (kubelet stopped posting status).
+2. **Stale / pending etcd member** — `clusteroperator/etcd` reports a pending member (e.g. `NAME-PENDING-<new-ip> has not started`) with only 2 of 3 members healthy. API server etcd URLs may point at the new IP while the member never joined.
+3. **Stale Machine vs new Node (topology drift)** — The **Machine** object (e.g. `<cluster-id>-master-0`) was **not deleted or updated** during replacement and still reports the **old IP** (`<old-ip>`). A **new Node** joined with the **new IP** (`<new-ip>`). Operators (**etcd**, **kube-apiserver**, **machine-config**) rely on Machine status and linked topology; the mismatch leaves endpoints and membership out of sync (OVN annotations on the node may still reference the old IP).
+4. **Static pod rollout stuck** — etcd operator shows the failing node at an old revision with a higher target revision; `0 nodes have achieved new revision`. Missing static pods on that node for kube-controller-manager and kube-scheduler.
+5. **Machine drain blocked** — Master Machines show `Drainable=False` with `EtcdQuorumOperator` preDrain hook (expected until etcd approves removal).
+6. **Downstream impact** — `machine-config` master pool shows fewer ready machines than expected; network operator rollouts may stall on the failed node.
 
-**Remediation direction:** Restore cl1-con01 (correct L2/L3 address, OVN/CNI, kubelet) *or* complete etcd member removal/add per [Red Hat etcd recovery docs](https://access.redhat.com/documentation/en-us/openshift_container_platform/4.20/html/postinstallation_network_configuration/configuration-changes-post-install#replacing-a-failed-etcd-member_post-install), then re-run master replacement. Do not delete a second master while etcd is degraded.
+**Remediation direction:** Restore the failing master (correct L2/L3 address, OVN/CNI, kubelet) *or* complete etcd member removal/add per [Red Hat etcd recovery documentation](https://access.redhat.com/documentation/en-us/openshift_container_platform/latest/html/postinstallation_network_configuration/configuration-changes-post-install#replacing-a-failed-etcd-member_post-install), then re-run master replacement. Do not delete a second master while etcd is degraded.
+
+### Verify stale Machine vs new Node
+
+Compare **Machine age/IP** with **Node age/IP**. A large age gap plus different InternalIPs on the same hostname indicates the Machine was not reconciled during replacement.
+
+*Single Machine — age, phase, linked node, IP from Machine status:*
+
+```bash
+oc get machine <machine-name> -n openshift-machine-api -o wide
+oc get machine <machine-name> -n openshift-machine-api -o jsonpath='
+  Machine:     {.metadata.name}
+  Created:     {.metadata.creationTimestamp}
+  Generation:  {.metadata.generation}
+  Phase:       {.status.phase}
+  NodeRef:     {.status.nodeRef.name}
+  Machine IP:  {.status.addresses[?(@.type=="InternalIP")].address}
+  ProviderID:  {.spec.providerID}
+'
+```
+
+*Single Node — age, Ready, IP from Node status, link back to Machine:*
+
+```bash
+oc get node <node-name> -o wide
+oc get node <node-name> -o jsonpath='
+  Node:        {.metadata.name}
+  Created:     {.metadata.creationTimestamp}
+  Ready:       {.status.conditions[?(@.type=="Ready")].status} ({.status.conditions[?(@.type=="Ready")].reason})
+  Node IP:     {.status.addresses[?(@.type=="InternalIP")].address}
+  Machine:     {.metadata.annotations.machine\.openshift\.io/machine}
+  OVN primary: {.metadata.annotations.k8s\.ovn\.org/node-primary-ifaddr}
+'
+```
+
+*All masters — side-by-side Machine IP vs Node IP:*
+
+```bash
+printf "%-32s %-20s %-16s %-32s %-20s %-16s\n" MACHINE M_CREATED MACHINE_IP NODE N_CREATED NODE_IP
+oc get machine -n openshift-machine-api \
+  -l machine.openshift.io/cluster-api-machine-role=master \
+  -o custom-columns=MACHINE:.metadata.name,M_CREATED:.metadata.creationTimestamp,MACHINE_IP:.status.addresses[?(@.type=="InternalIP")].address,NODE:.status.nodeRef.name \
+  --no-headers | while read -r m mc mip n; do
+  nc=$(oc get node "$n" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+  nip=$(oc get node "$n" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+  printf "%-32s %-20s %-16s %-32s %-20s %-16s\n" "$m" "$mc" "${mip:-N/A}" "${n:-N/A}" "${nc:-N/A}" "${nip:-N/A}"
+done
+```
+
+*Operators that depend on control-plane topology:*
+
+```bash
+oc get co etcd kube-apiserver machine-config -o custom-columns=NAME:.metadata.name,AVAILABLE:.status.conditions[?(@.type=="Available")].status,DEGRADED:.status.conditions[?(@.type=="Degraded")].status,MESSAGE:.status.conditions[?(@.type=="Degraded")].message
+oc describe co etcd | sed -n '/Message:/,/Reason:/p'
+oc get openshiftapiserver cluster -o yaml | grep -E 'etcd-servers|storage'
+oc get kubeapiserver cluster -o yaml | grep -E 'etcd-servers|storage'
+oc get mcp master -o custom-columns=POOL:.metadata.name,MACHINES:.status.machineCount,READY:.status.readyMachineCount,UNAVAILABLE:.status.unavailableMachineCount,UPDATED:.status.updatedMachineCount
+oc get etcd cluster -o jsonpath='{range .status.nodeStatuses[*]}{.nodeName}{"\t"}current={.currentRevision}{"\t"}target={.targetRevision}{"\n"}{end}'
+```
+
+**Expected when replacement failed:** Machine **M_CREATED** is much older than Node **N_CREATED**; **MACHINE_IP** (`<old-ip>`) ≠ **NODE_IP** (`<new-ip>`) for the same **NODE** name; etcd CO mentions a pending member at the Node IP while the Machine still advertises the old IP.
 
 ### OpenShift commands
 
@@ -232,6 +292,10 @@ Master replacement for **cl1-con01.sv7.ocp.broadcast.siriusxm.com** (`sv7-cl1-r2
 | `oc describe node <node-name>` | Conditions, taints, events (NotReady, Unknown, unreachable). |
 | `oc adm node-logs <node-name> kubelet` | Kubelet logs on the failing master (requires node access). |
 | `oc debug node/<node-name> -- chroot /host journalctl -u kubelet -n 200` | Kubelet journal on the node (interactive debug). |
+| `oc get machine <machine-name> -n openshift-machine-api -o jsonpath='{.metadata.creationTimestamp}{"\n"}{.status.addresses}'` | Machine object age and status addresses (operator-facing IP). |
+| `oc get node <node-name> -o jsonpath='{.metadata.creationTimestamp}{"\n"}{.status.addresses}'` | Node object age and status addresses (kubelet-reported IP). |
+| `oc get machine -n openshift-machine-api -l machine.openshift.io/cluster-api-machine-role=master -o custom-columns=NAME:.metadata.name,AGE:.metadata.creationTimestamp,IP:.status.addresses[?(@.type=="InternalIP")].address,NODE:.status.nodeRef.name` | All master Machines with creation time and IP. |
+| `oc get nodes -l node-role.kubernetes.io/master= -o custom-columns=NAME:.metadata.name,AGE:.metadata.creationTimestamp,IP:.status.addresses[?(@.type=="InternalIP")].address,MACHINE:.metadata.annotations.machine\.openshift\.io/machine` | All master Nodes with creation time, IP, and Machine annotation. |
 | `oc get machine -n openshift-machine-api -l machine.openshift.io/cluster-api-machine-role=master` | Master Machine objects and phase. |
 | `oc describe machine <machine-name> -n openshift-machine-api` | Drainable/Terminable conditions, `EtcdQuorumOperator` hook, nodeRef. |
 | `oc get machineset -n openshift-machine-api` | MachineSets for control-plane (scale/replace context). |
@@ -248,7 +312,7 @@ Master replacement for **cl1-con01.sv7.ocp.broadcast.siriusxm.com** (`sv7-cl1-r2
 | `oc get secret -n openshift-etcd \| grep <node-name>` | Per-node etcd serving certs (missing cert errors in operator logs). |
 | `oc get endpoints -n openshift-etcd -o yaml` | etcd client endpoints published to the cluster. |
 | `oc get kubeapiserver cluster -o jsonpath='{.status.latestAvailableRevision}'` | API server revision (correlate with etcd). |
-| `oc get openshiftapiserver cluster -o yaml` | Observed `etcd-servers` list (verify IP .91 vs .13 mismatch). |
+| `oc get openshiftapiserver cluster -o yaml` | Observed `etcd-servers` list (verify old vs new IP mismatch). |
 | `oc get pods -n openshift-kube-apiserver -o wide` | API server pods and which nodes they run on. |
 | `oc get pods -n openshift-kube-controller-manager -o wide` | Missing static pod errors reference this namespace. |
 | `oc get pods -n openshift-kube-scheduler -o wide` | Scheduler static pods on masters. |
@@ -261,7 +325,7 @@ Master replacement for **cl1-con01.sv7.ocp.broadcast.siriusxm.com** (`sv7-cl1-r2
 | `oc adm certificate approve <csr-name>` | Approve pending node/kubelet certificates. |
 | `oc get pods -n openshift-machine-api` | machine-api / baremetal operator pods. |
 | `oc logs -n openshift-machine-api deployment/machine-api-controllers --tail=100` | Machine controller drain/delete errors. |
-| `oc adm must-gather` | Collect support bundle when replacing masters (as in this analysis). |
+| `oc adm must-gather` | Collect support bundle when replacing masters. |
 
 **On a healthy quorum node (advanced, use with care):**
 
@@ -278,4 +342,4 @@ Master replacement for **cl1-con01.sv7.ocp.broadcast.siriusxm.com** (`sv7-cl1-r2
 - Commands with `-n <namespace>` use OpenShift/Kubernetes namespaces such as `openshift-ovn-kubernetes`, `openshift-dns`, `openshift-etcd`, and `kube-system`.
 - Resource short names: `co` = clusteroperators, `mcp` = machineconfigpools, `csv` = clusterserviceversions, `csr` = certificatesigningrequests, `nns` = nodenetworkstates, `cm` = configmaps.
 
-*Commands from `ocp4hc-extended.sh`; master replacement section informed by `must-gather-siriusxm.tar.gz` (2026-05-22).*
+*Commands from `ocp4hc-extended.sh`; master replacement section derived from must-gather analysis (customer-specific details removed).*
