@@ -68,7 +68,7 @@ Commands extracted from the extended cluster health check script. Placeholders s
 | `oc describe pod -n <namespace> <pod-name>` | Pod events, scheduling, and container state for failing pods. |
 | `oc logs -n <namespace> <pod-name> --tail=50` | Recent container logs for a non-running pod. |
 
-**Installed operators with version** — Succeeded-phase CSVs with namespace, display name, and `spec.version` (matches health check “Installed operators (OLM)”).
+**Installed operators with version** — Succeeded-phase CSVs with namespace, display name, and `spec.version`. Output is **deduplicated by operator name** (one row per operator; if the same operator appears in multiple namespaces, the first row after sort is kept). Matches health check “Installed operators (OLM)” logic with deduplication applied.
 
 *With jq:*
 
@@ -76,28 +76,34 @@ Commands extracted from the extended cluster health check script. Placeholders s
 oc get csv -A -o json | jq -r '
   [.items[] | select(.status.phase=="Succeeded")
     | .metadata.name as $csvname
-    | [.metadata.namespace,
-       ((.spec.displayName | if . == null or . == "" then $csvname else . end)),
-       (.spec.version // "N/A")]
+    | {
+        namespace: .metadata.namespace,
+        operator: ((.spec.displayName | if . == null or . == "" then $csvname else . end)),
+        version: (.spec.version // "N/A")
+      }
   ]
-  | sort_by(.[0], .[1])
-  | .[]
+  | sort_by(.operator, .namespace, .version)
+  | unique_by(.operator)
+  | [.namespace, .operator, .version]
   | @tsv' | column -t
 ```
 
-*Without jq* — uses `oc` go-template, `awk`, and `sort` (POSIX-friendly; no `jq` or `column` required):
+*Without jq* — uses `oc` go-template, `sort`, and `awk` (POSIX-friendly; no `jq` or `column` required):
 
 ```bash
 printf "%-28s %-48s %s\n" NAMESPACE OPERATOR VERSION
 oc get csv -A -o go-template='{{range .items}}{{if eq .status.phase "Succeeded"}}{{.metadata.namespace}}{{"	"}}{{if .spec.displayName}}{{.spec.displayName}}{{else}}{{.metadata.name}}{{end}}{{"	"}}{{if .spec.version}}{{.spec.version}}{{else}}N/A{{end}}{{"\n"}}{{end}}{{end}}' \
-  | LC_ALL=C sort \
-  | awk -F'	' '{printf "%-28s %-48s %s\n", $1, $2, ($3 != "" ? $3 : "N/A")}'
+  | LC_ALL=C sort -t '	' -k2,2 -k1,1 -k3,3 \
+  | awk -F'	' '!seen[$2]++ {printf "%-28s %-48s %s\n", $1, $2, ($3 != "" ? $3 : "N/A")}'
 ```
 
-*Quick view* — default `oc` columns (includes VERSION); keep rows where phase is Succeeded:
+*Quick view* — tab-separated fields, deduplicated by operator (column 2):
 
 ```bash
-oc get csv -A | awk 'NR==1 || $NF=="Succeeded"'
+printf "%-28s %-48s %s\n" NAMESPACE OPERATOR VERSION
+oc get csv -A -o go-template='{{range .items}}{{if eq .status.phase "Succeeded"}}{{.metadata.namespace}}{{"	"}}{{if .spec.displayName}}{{.spec.displayName}}{{else}}{{.metadata.name}}{{end}}{{"	"}}{{if .spec.version}}{{.spec.version}}{{else}}N/A{{end}}{{"\n"}}{{end}}{{end}}' \
+  | LC_ALL=C sort -t '	' -k2,2 \
+  | awk -F'	' '!seen[$2]++ {print $1, $2, $3}'
 ```
 
 ---
