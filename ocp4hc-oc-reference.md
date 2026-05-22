@@ -207,10 +207,75 @@ oc get csv -A -o go-template='{{range .items}}{{if eq .status.phase "Succeeded"}
 
 ---
 
+## Master node replacement troubleshooting
+
+Analysis from `must-gather-siriusxm.tar.gz` (cluster **sv7-cl1-r2dt7**, bare-metal masters **cl1-con01/02/03**).
+
+### Root cause (summary)
+
+Master replacement for **cl1-con01.sv7.ocp.broadcast.siriusxm.com** (`sv7-cl1-r2dt7-master-0`) failed and left the control plane degraded:
+
+1. **Replacement node never stabilized** — Node registered `2026-05-21T18:08:57Z`, first reported `KubeletNotReady` / **NetworkPluginNotReady** (no CNI in `/etc/kubernetes/cni/net.d/`), then **NodeStatusUnknown** from `2026-05-21T20:49:13Z` (kubelet stopped posting status).
+2. **Stale / pending etcd member** — `clusteroperator/etcd` reports `NAME-PENDING-10.103.50.13 has not started` (only 2 of 3 members healthy). API server etcd URLs were updated to `https://10.103.50.13:2379` while the member never joined.
+3. **IP inconsistency on the failing master** — Node `status.addresses` shows **10.103.50.13**, but the Machine and OVN annotations still reference **10.103.50.91**, blocking correct etcd endpoint and network alignment.
+4. **Static pod rollout stuck** — `etcd` operator: `cl1-con01` at revision **39**, target **51**; `0 nodes have achieved new revision 51`. Missing static pods on cl1-con01 for kube-controller-manager and kube-scheduler.
+5. **Machine drain blocked** — All master Machines show `Drainable=False` with `EtcdQuorumOperator` preDrain hook (expected until etcd approves removal).
+6. **Downstream impact** — `machine-config` master pool: **2/3 ready**, **1 unavailable**; network operator rollouts stalled on the failed node.
+
+**Remediation direction:** Restore cl1-con01 (correct L2/L3 address, OVN/CNI, kubelet) *or* complete etcd member removal/add per [Red Hat etcd recovery docs](https://access.redhat.com/documentation/en-us/openshift_container_platform/4.20/html/postinstallation_network_configuration/configuration-changes-post-install#replacing-a-failed-etcd-member_post-install), then re-run master replacement. Do not delete a second master while etcd is degraded.
+
+### OpenShift commands
+
+| Command | Description |
+|---------|-------------|
+| `oc get nodes -l node-role.kubernetes.io/master= -o wide` | Master nodes, roles, IPs, and Ready state. |
+| `oc describe node <node-name>` | Conditions, taints, events (NotReady, Unknown, unreachable). |
+| `oc adm node-logs <node-name> kubelet` | Kubelet logs on the failing master (requires node access). |
+| `oc debug node/<node-name> -- chroot /host journalctl -u kubelet -n 200` | Kubelet journal on the node (interactive debug). |
+| `oc get machine -n openshift-machine-api -l machine.openshift.io/cluster-api-machine-role=master` | Master Machine objects and phase. |
+| `oc describe machine <machine-name> -n openshift-machine-api` | Drainable/Terminable conditions, `EtcdQuorumOperator` hook, nodeRef. |
+| `oc get machineset -n openshift-machine-api` | MachineSets for control-plane (scale/replace context). |
+| `oc get baremetalhost -n openshift-machine-api` | Bare-metal host provisioning state (IPI bare metal). |
+| `oc describe baremetalhost <host-name> -n openshift-machine-api` | BMH errors, `operationalStatus`, consumerRef to Machine. |
+| `oc get co etcd` | etcd cluster operator Available/Degraded/Progressing. |
+| `oc describe co etcd` | Full etcd CO messages (pending members, master NotReady). |
+| `oc get etcd cluster -o yaml` | etcd member status, `nodeStatuses`, target/current revisions. |
+| `oc get etcd cluster -o jsonpath='{.status.nodeStatuses}'` | Per-master revision rollout (e.g. stuck at 39 → 51). |
+| `oc get pods -n openshift-etcd -o wide` | etcd static pods per control-plane node. |
+| `oc logs -n openshift-etcd -l app=etcd -c etcd --tail=200` | etcd container logs (member health, TLS, peers). |
+| `oc get events -n openshift-etcd --sort-by='.lastTimestamp'` | etcd namespace events (installers, guards, failures). |
+| `oc logs -n openshift-etcd-operator deployment/etcd-operator --tail=200` | cluster-etcd-operator reconciliation errors. |
+| `oc get secret -n openshift-etcd \| grep <node-name>` | Per-node etcd serving certs (missing cert errors in operator logs). |
+| `oc get endpoints -n openshift-etcd -o yaml` | etcd client endpoints published to the cluster. |
+| `oc get kubeapiserver cluster -o jsonpath='{.status.latestAvailableRevision}'` | API server revision (correlate with etcd). |
+| `oc get openshiftapiserver cluster -o yaml` | Observed `etcd-servers` list (verify IP .91 vs .13 mismatch). |
+| `oc get pods -n openshift-kube-apiserver -o wide` | API server pods and which nodes they run on. |
+| `oc get pods -n openshift-kube-controller-manager -o wide` | Missing static pod errors reference this namespace. |
+| `oc get pods -n openshift-kube-scheduler -o wide` | Scheduler static pods on masters. |
+| `oc get mcp master` | Master MachineConfigPool ready/unavailable counts. |
+| `oc describe mcp master` | MCP updating/degraded; which nodes lack rendered config. |
+| `oc get machineconfigpool master -o jsonpath='{.status}'` | Machine counts: ready vs unavailable during replacement. |
+| `oc get pods -n openshift-ovn-kubernetes -o wide \| grep <node-name>` | OVN kube-node on the master (CNI readiness). |
+| `oc get events -A --field-selector involvedObject.name=<node-name> --sort-by='.lastTimestamp'` | All events involving the failing master node. |
+| `oc get csr` | Pending CSRs for new control-plane kubelet/API clients. |
+| `oc adm certificate approve <csr-name>` | Approve pending node/kubelet certificates. |
+| `oc get pods -n openshift-machine-api` | machine-api / baremetal operator pods. |
+| `oc logs -n openshift-machine-api deployment/machine-api-controllers --tail=100` | Machine controller drain/delete errors. |
+| `oc adm must-gather` | Collect support bundle when replacing masters (as in this analysis). |
+
+**On a healthy quorum node (advanced, use with care):**
+
+| Command | Description |
+|---------|-------------|
+| `oc rsh -n openshift-etcd -c etcd etcd-<healthy-node> etcdctl member list -w table` | List etcd members (find stale `NAME-PENDING` entries). |
+| `oc rsh -n openshift-etcd -c etcd etcd-<healthy-node> etcdctl endpoint health` | Check which etcd endpoints respond. |
+
+---
+
 ## Notes
 
 - Many checks pipe `oc` output through `grep`, `awk`, `jq`, or `column`; the table lists the underlying `oc` invocations.
 - Commands with `-n <namespace>` use OpenShift/Kubernetes namespaces such as `openshift-ovn-kubernetes`, `openshift-dns`, `openshift-etcd`, and `kube-system`.
 - Resource short names: `co` = clusteroperators, `mcp` = machineconfigpools, `csv` = clusterserviceversions, `csr` = certificatesigningrequests, `nns` = nodenetworkstates, `cm` = configmaps.
 
-*Generated from `ocp4hc-extended.sh`.*
+*Commands from `ocp4hc-extended.sh`; master replacement section informed by `must-gather-siriusxm.tar.gz` (2026-05-22).*
