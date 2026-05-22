@@ -259,16 +259,32 @@ oc get node <node-name> -o jsonpath='
 
 *All masters — side-by-side Machine IP vs Node IP:*
 
+(`custom-columns` does not support JSONPath filters such as `[?(@.type=="InternalIP")]`; use `go-template` and tab-separated fields instead.)
+
 ```bash
 printf "%-32s %-20s %-16s %-32s %-20s %-16s\n" MACHINE M_CREATED MACHINE_IP NODE N_CREATED NODE_IP
 oc get machine -n openshift-machine-api \
   -l machine.openshift.io/cluster-api-machine-role=master \
-  -o custom-columns=MACHINE:.metadata.name,M_CREATED:.metadata.creationTimestamp,MACHINE_IP:.status.addresses[?(@.type=="InternalIP")].address,NODE:.status.nodeRef.name \
-  --no-headers | while read -r m mc mip n; do
-  nc=$(oc get node "$n" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
-  nip=$(oc get node "$n" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
-  printf "%-32s %-20s %-16s %-32s %-20s %-16s\n" "$m" "$mc" "${mip:-N/A}" "${n:-N/A}" "${nc:-N/A}" "${nip:-N/A}"
+  -o go-template='{{range .items}}{{.metadata.name}}{{"	"}}{{.metadata.creationTimestamp}}{{"	"}}{{range .status.addresses}}{{if eq .type "InternalIP"}}{{.address}}{{end}}{{end}}{{"	"}}{{if .status.nodeRef}}{{.status.nodeRef.name}}{{end}}{{"\n"}}{{end}}' \
+| while IFS="$(printf '\t')" read -r m mc mip n; do
+  [ -z "$m" ] && continue
+  if [ -n "$n" ]; then
+    nc=$(oc get node "$n" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+    nip=$(oc get node "$n" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
+  else
+    nc="N/A"
+    nip="N/A"
+  fi
+  printf "%-32s %-20s %-16s %-32s %-20s %-16s\n" "$m" "$mc" "${mip:-N/A}" "$n" "${nc:-N/A}" "${nip:-N/A}"
 done
+```
+
+*Alternative (two wide listings, no loop — compare MACHINE vs NODE columns manually):*
+
+```bash
+oc get machine -n openshift-machine-api \
+  -l machine.openshift.io/cluster-api-machine-role=master -o wide
+oc get nodes -l node-role.kubernetes.io/master= -o wide
 ```
 
 *Operators that depend on control-plane topology:*
