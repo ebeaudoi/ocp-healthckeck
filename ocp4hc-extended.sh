@@ -286,27 +286,38 @@ else
     printf "Verify all operators states -- $CLRGRN PASSED $CLRRESET\n"
 fi
 
-# Installed operators (OLM ClusterServiceVersions in Succeeded phase)
+# Installed operators (OLM ClusterServiceVersions in Succeeded phase; one row per operator name)
 print_hc_section "Installed operators (OLM)"
 CSV_JSON=$(oc get csv -A -o json 2>/dev/null)
 INSTALLED_OP_COUNT=$(echo "$CSV_JSON" | jq '[.items[] | select(.status.phase=="Succeeded")] | length' 2>/dev/null)
+UNIQUE_OP_COUNT=$(echo "$CSV_JSON" | jq -r '
+  [.items[] | select(.status.phase=="Succeeded")
+    | .metadata.name as $csvname
+    | ((.spec.displayName | if . == null or . == "" then $csvname else . end))
+  ] | unique | length' 2>/dev/null)
 if [ -z "$INSTALLED_OP_COUNT" ] || ! [[ "$INSTALLED_OP_COUNT" =~ ^[0-9]+$ ]]; then
     printf "  Could not list operators (oc get csv or jq failed) -- $CLRYLW SKIPPED $CLRRESET\n"
 elif [ "$INSTALLED_OP_COUNT" -eq 0 ]; then
     printf "  No operators in Succeeded phase.\n"
 else
-    printf "  Count: %d (ClusterServiceVersions with phase Succeeded)\n\n" "$INSTALLED_OP_COUNT"
+    if [ -n "$UNIQUE_OP_COUNT" ] && [[ "$UNIQUE_OP_COUNT" =~ ^[0-9]+$ ]] && [ "$UNIQUE_OP_COUNT" -ne "$INSTALLED_OP_COUNT" ]; then
+        printf "  Count: %d unique operators (%d Succeeded CSVs)\n\n" "$UNIQUE_OP_COUNT" "$INSTALLED_OP_COUNT"
+    else
+        printf "  Count: %d (ClusterServiceVersions with phase Succeeded)\n\n" "${UNIQUE_OP_COUNT:-$INSTALLED_OP_COUNT}"
+    fi
     printf "  %-28s %-48s %s\n" "NAMESPACE" "OPERATOR" "VERSION"
     echo "$CSV_JSON" | jq -r '
       [.items[] | select(.status.phase=="Succeeded")
         | .metadata.name as $csvname
-        | [ .metadata.namespace,
-            ((.spec.displayName | if . == null or . == "" then $csvname else . end)),
-            (.spec.version // "N/A")
-          ]
-        ]
-      | sort_by(.[0], .[1])
-      | .[]
+        | {
+            namespace: .metadata.namespace,
+            operator: ((.spec.displayName | if . == null or . == "" then $csvname else . end)),
+            version: (.spec.version // "N/A")
+          }
+      ]
+      | sort_by(.operator, .namespace, .version)
+      | unique_by(.operator)
+      | [.namespace, .operator, .version]
       | @tsv
     ' 2>/dev/null | while IFS=$'\t' read -r ns op ver; do
         [ -n "$ns" ] && printf "  %-28s %-48s %s\n" "$ns" "$op" "${ver:-N/A}"
