@@ -84,6 +84,7 @@ oc get csv -A -o json | jq -r '
   ]
   | sort_by(.operator, .namespace, .version)
   | unique_by(.operator)
+  | .[]
   | [.namespace, .operator, .version]
   | @tsv' | column -t
 ```

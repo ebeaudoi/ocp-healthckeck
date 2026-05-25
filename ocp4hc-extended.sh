@@ -309,18 +309,17 @@ else
     echo "$CSV_JSON" | jq -r '
       [.items[] | select(.status.phase=="Succeeded")
         | .metadata.name as $csvname
-        | {
-            namespace: .metadata.namespace,
-            operator: ((.spec.displayName | if . == null or . == "" then $csvname else . end)),
-            version: (.spec.version // "N/A")
-          }
-      ]
-      | sort_by(.operator, .namespace, .version)
-      | unique_by(.operator)
-      | [.namespace, .operator, .version]
+        | [ .metadata.namespace,
+            ((.spec.displayName | if . == null or . == "" then $csvname else . end)),
+            (.spec.version // "N/A")
+          ]
+        ]
+      | sort_by(.[1], .[0], .[2])
+      | unique_by(.[1])
+      | .[]
       | @tsv
     ' 2>/dev/null | while IFS=$'\t' read -r ns op ver; do
-        [ -n "$ns" ] && printf "  %-28s %-48s %s\n" "$ns" "$op" "${ver:-N/A}"
+        [ -n "$op" ] && printf "  %-28s %-48s %s\n" "$ns" "$op" "${ver:-N/A}"
     done
 fi
 
